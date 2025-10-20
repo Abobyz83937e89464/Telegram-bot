@@ -1,3 +1,4 @@
+import imghdr
 import os
 import logging
 import re
