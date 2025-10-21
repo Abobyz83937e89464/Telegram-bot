@@ -1,7 +1,6 @@
 import os
 import logging
 import re
-import sqlite3
 import requests
 import threading
 import asyncio
@@ -45,13 +44,11 @@ def start_health_server():
     server = HTTPServer(('0.0.0.0', 10000), HealthHandler)
     server.serve_forever()
 
-conn = sqlite3.connect('users.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS users 
-             (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-conn.commit()
+# УБРАЛИ SQLITE
+async def save_user(user_id, username, first_name):
+    pass
 
-MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL = range(4)
+MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL, BROADCAST_MESSAGE = range(5)
 
 DRIVE_FILES = [
     {"name": "boo.wf_100mln_0.csv", "url": "https://drive.google.com/uc?export=download&id=1U6C-SqeNWv3ylYujFBTZS0yY1uWk2BQk"},
@@ -74,14 +71,6 @@ DRIVE_FILES = [
 
 # ПУЛ ПОТОКОВ ДЛЯ МНОГОПОЛЬЗОВАТЕЛЬСКОСТИ
 search_executor = ThreadPoolExecutor(max_workers=20)
-
-async def save_user(user_id, username, first_name):
-    try:
-        c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)", 
-                 (user_id, username, first_name))
-        conn.commit()
-    except:
-        pass
 
 def download_file_fast(drive_url, file_name):
     try:
@@ -137,9 +126,15 @@ def fast_search_in_cache(query, databases):
     
     return results
 
+# ХРАНИЛИЩЕ ДЛЯ РАССЫЛКИ
+user_ids = set()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     await save_user(user.id, user.username, user.first_name)
+    
+    # СОХРАНЯЕМ ЮЗЕРА ДЛЯ РАССЫЛКИ
+    user_ids.add(user.id)
     
     if user.id == ADMIN_ID:
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
@@ -180,7 +175,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif choice == "👑 Админ панель":
         keyboard = [
             ["📊 Статистика", "👥 Пользователи"],
-            ["🔙 В главное меню"]
+            ["📢 Рассылка", "🔙 В главное меню"]
         ]
         await update.message.reply_text(
             "👑 **АДМИН ПАНЕЛЬ**\nВыберите действие:",
@@ -192,25 +187,43 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     choice = update.message.text
     
     if choice == "📊 Статистика":
-        c.execute("SELECT COUNT(*) FROM users")
-        user_count = c.fetchone()[0]
-        files_count = len(DRIVE_FILES)
-        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {user_count}\n📁 Файлов: {files_count}")
+        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {len(user_ids)}\n📁 Файлов: {len(DRIVE_FILES)}")
         return ADMIN_PANEL
         
     elif choice == "👥 Пользователи":
-        c.execute("SELECT user_id, first_name, joined_date FROM users ORDER BY joined_date DESC LIMIT 5")
-        users = c.fetchall()
-        response = "👥 **ПОЛЬЗОВАТЕЛИ:**\n\n"
-        for user in users:
-            response += f"👤 {user[1] or 'No name'}\n🆔 {user[0]}\n📅 {user[2]}\n━━━━━━━━━━\n"
-        await update.message.reply_text(response)
+        await update.message.reply_text(f"👥 **ПОЛЬЗОВАТЕЛИ**\n\nВсего пользователей: {len(user_ids)}")
         return ADMIN_PANEL
+        
+    elif choice == "📢 Рассылка":
+        await update.message.reply_text("📢 **РАССЫЛКА**\n\nВведите сообщение для рассылки:", reply_markup=ReplyKeyboardRemove())
+        return BROADCAST_MESSAGE
         
     elif choice == "🔙 В главное меню":
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
         await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False))
         return MAIN_MENU
+
+async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message.text
+    success = 0
+    failed = 0
+    
+    broadcast_msg = await update.message.reply_text(f"📢 **Рассылка начата**\n\nОтправлено: 0/{len(user_ids)}")
+    
+    for user_id in list(user_ids):
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"📢 **РАССЫЛКА:**\n\n{message}")
+            success += 1
+            if success % 10 == 0:
+                await broadcast_msg.edit_text(f"📢 **Рассылка...**\n\nОтправлено: {success}/{len(user_ids)}")
+        except:
+            failed += 1
+    
+    await broadcast_msg.edit_text(f"✅ **Рассылка завершена**\n\n✅ Успешно: {success}\n❌ Не удалось: {failed}")
+    
+    keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
+    await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False))
+    return MAIN_MENU
 
 async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.strip() != USER_PASSWORD:
@@ -272,6 +285,7 @@ def main():
             PASSWORD_CHECK: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_password)],
             SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_data)],
             ADMIN_PANEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_panel)],
+            BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast)],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("back", back_command)]
     )
@@ -280,13 +294,11 @@ def main():
     app.add_handler(CommandHandler("back", back_command))
     
     # ПРЕДЗАГРУЗКА БАЗ ПРИ СТАРТЕ
-    if os.getenv('RENDER'):
-        health_thread = threading.Thread(target=start_health_server, daemon=True)
-        health_thread.start()
+    if os.getenv('RAILWAY'):
         logger.info("🔄 Предзагрузка баз в кэш...")
         load_databases_to_cache()
     
-    logging.info("🟢 БОТ ЗАПУЩЕН! 50+ ПОЛЬЗОВАТЕЛЕЙ ГОТОВО!")
+    logging.info("🟢 БОТ ЗАПУЩЕН! 50+ ПОЛЬЗОВАТЕЛЕЙ + РАССЫЛКА!")
     app.run_polling()
 
 if __name__ == "__main__":
