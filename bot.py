@@ -101,6 +101,32 @@ def download_file_fast(drive_url, file_name):
         logger.error(f"Ошибка загрузки {file_name}: {e}")
         return ""
 
+def search_in_file_sync(file_info, query):
+    """СИНХРОННЫЙ ПОИСК В 1 ФАЙЛЕ"""
+    try:
+        content = download_file_fast(file_info["url"], file_info["name"])
+        if not content:
+            return []
+        
+        results = []
+        for line in content.splitlines():
+            if query in line:
+                phones = re.findall(r'\d{7,15}', line)
+                names = re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+', line)
+                emails = re.findall(r'\S+@\S+', line)
+                
+                for phone in phones:
+                    results.append(f"📞 {phone}")
+                for name in names:
+                    results.append(f"👤 {name}")
+                for email in emails:
+                    results.append(f"📧 {email}")
+        
+        return results
+    except Exception as e:
+        logger.error(f"Ошибка в базе {file_info['name']}: {e}")
+        return []
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     await save_user(user.id, user.username, user.first_name)
@@ -335,35 +361,22 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        results = []
+        # ЗАПУСКАЕМ ВСЕ ПОИСКИ ПАРАЛЛЕЛЬНО
+        loop = asyncio.get_event_loop()
+        tasks = []
         
-        # ПОТОКОВЫЙ ПОИСК ПО 1 БАЗЕ ЗА РАЗ
-        for i, file_info in enumerate(DRIVE_FILES):
-            try:
-                await search_message.edit_text(
-                    f"🔍 **Поиск:** `{query}`\n\n"
-                    f"💎 *Осталось запросов: {searches_left}*\n"
-                    f"*База {i+1}/16: {file_info['name']}*"
-                )
-                
-                # СКАЧИВАЕМ И ИЩЕМ В 1 БАЗЕ
-                content = download_file_fast(file_info["url"], file_info["name"])
-                if content:
-                    for line in content.splitlines():
-                        if query in line:
-                            phones = re.findall(r'\d{7,15}', line)
-                            names = re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+', line)
-                            emails = re.findall(r'\S+@\S+', line)
-                            
-                            for phone in phones:
-                                results.append(f"📞 {phone}")
-                            for name in names:
-                                results.append(f"👤 {name}")
-                            for email in emails:
-                                results.append(f"📧 {email}")
-            except Exception as e:
-                logger.error(f"Ошибка в базе {file_info['name']}: {e}")
-                continue
+        for file_info in DRIVE_FILES:
+            task = loop.run_in_executor(search_executor, search_in_file_sync, file_info, query)
+            tasks.append(task)
+        
+        # ЖДЕМ РЕЗУЛЬТАТЫ ОТ ВСЕХ ФАЙЛОВ
+        results_lists = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # ОБЪЕДИНЯЕМ РЕЗУЛЬТАТЫ
+        results = []
+        for result in results_lists:
+            if isinstance(result, list):
+                results.extend(result)
         
         await search_message.delete()
         
@@ -435,7 +448,7 @@ def main():
     user_data[ADMIN_ID]["unlimited"] = True
     user_data[ADMIN_ID]["searches_left"] = 9999
     
-    logging.info(f"🟢 БОТ ЗАПУЩЕН! Система платных запросов активирована!")
+    logging.info(f"🟢 БОТ ЗАПУЩЕН! Многопользовательский режим активирован!")
     app.run_polling()
 
 if __name__ == "__main__":
