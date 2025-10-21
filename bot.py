@@ -6,10 +6,20 @@ import requests
 import threading
 import asyncio
 import time
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+
+# ФИКС ДЛЯ IMGHDR
+if sys.version_info >= (3, 11):
+    import imghdr
+else:
+    class imghdr:
+        @staticmethod
+        def what(file, h=None):
+            return None
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 USER_PASSWORD = "morpa"
