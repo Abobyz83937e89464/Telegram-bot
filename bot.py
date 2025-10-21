@@ -2,13 +2,10 @@ import os
 import logging
 import re
 import requests
-import threading
 import asyncio
 import time
 import sys
-from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
@@ -28,22 +25,10 @@ ADMIN_ID = 8049083248
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'OK')
-    def log_message(self, format, *args):
-        pass
-
-def start_health_server():
-    server = HTTPServer(('0.0.0.0', 10000), HealthHandler)
-    server.serve_forever()
-
 # ХРАНИЛИЩЕ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ И ЗАПРОСОВ
-user_data = {}  # {user_id: {"searches_left": 3, "last_reset": timestamp, "unlimited": False}}
+user_data = {}
 active_searches = 0
-max_concurrent_searches = 10
+max_concurrent_searches = 15  # УВЕЛИЧИЛИ ДО 15
 
 MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL, BROADCAST_MESSAGE, ADD_SEARCHES = range(6)
 
@@ -66,8 +51,8 @@ DRIVE_FILES = [
     {"name": "Адрес клиентов_9.3k.csv", "url": "https://drive.google.com/uc?export=download&id=1nZIuSMThLynwXkrJj6jWgos-NwvsSrps"}
 ]
 
-# ПУЛ ДЛЯ ПОИСКА
-search_executor = ThreadPoolExecutor(max_workers=15)
+# ПУЛ ДЛЯ ПОИСКА - УВЕЛИЧИЛИ ДО 20 ПОТОКОВ
+search_executor = ThreadPoolExecutor(max_workers=20)
 
 def init_user(user_id):
     """ИНИЦИАЛИЗАЦИЯ ПОЛЬЗОВАТЕЛЯ"""
@@ -82,7 +67,7 @@ def init_user(user_id):
     
     # ПРОВЕРКА СБРОСА ЗАПРОСОВ (КАЖДЫЙ ЧАС)
     user = user_data[user_id]
-    if time.time() - user["last_reset"] >= 3600:  # 1 час
+    if time.time() - user["last_reset"] >= 3600:
         user["searches_left"] = 3
         user["last_reset"] = time.time()
     
@@ -93,7 +78,7 @@ async def save_user(user_id, username, first_name):
 
 def download_file_fast(drive_url, file_name):
     try:
-        response = requests.get(drive_url, timeout=60)
+        response = requests.get(drive_url, timeout=30)
         if response.status_code == 200:
             return response.text
         return ""
@@ -357,26 +342,16 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_message = await update.message.reply_text(
         f"🔍 **Поиск:** `{query}`\n\n"
         f"💎 *Осталось запросов: {searches_left}*\n"
-        f"*Сканирую 16 баз... (2-3 минуты)*"
+        f"*Сканирую 16 баз... (1-2 минуты)*"
     )
     
     try:
-        # ЗАПУСКАЕМ ВСЕ ПОИСКИ ПАРАЛЛЕЛЬНО
+        # ЗАПУСКАЕМ ПОИСК В ОТДЕЛЬНОМ ПОТОКЕ СРАЗУ
         loop = asyncio.get_event_loop()
-        tasks = []
+        future = loop.run_in_executor(search_executor, perform_search, query)
         
-        for file_info in DRIVE_FILES:
-            task = loop.run_in_executor(search_executor, search_in_file_sync, file_info, query)
-            tasks.append(task)
-        
-        # ЖДЕМ РЕЗУЛЬТАТЫ ОТ ВСЕХ ФАЙЛОВ
-        results_lists = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # ОБЪЕДИНЯЕМ РЕЗУЛЬТАТЫ
-        results = []
-        for result in results_lists:
-            if isinstance(result, list):
-                results.extend(result)
+        # ЖДЕМ РЕЗУЛЬТАТ АСИНХРОННО - БОТ НЕ БЛОКИРУЕТСЯ
+        results = await asyncio.wait_for(future, timeout=120.0)  # 2 минуты таймаут
         
         await search_message.delete()
         
@@ -408,9 +383,12 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Обратитесь к создателю: @the_observer_os\n\n"
                 "💫 *Мы ценим каждого пользователя!*"
             )
-        else:
-            await update.message.reply_text("**Введите данные для поиска или /back:**")
         
+        await update.message.reply_text("**Введите данные для поиска или /back:**")
+        
+    except asyncio.TimeoutError:
+        await search_message.edit_text("⏰ Поиск прерван (таймаут 2 минуты)")
+        await update.message.reply_text("**Введите данные для поиска или /back:**")
     except Exception as e:
         logger.error(f"Ошибка поиска: {e}")
         await search_message.edit_text("❌ Ошибка поиска")
@@ -419,6 +397,32 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_searches -= 1
     
     return SEARCH_QUERY
+
+def perform_search(query):
+    """СИНХРОННАЯ ФУНКЦИЯ ПОИСКА В ОТДЕЛЬНОМ ПОТОКЕ"""
+    results = []
+    
+    for i, file_info in enumerate(DRIVE_FILES):
+        try:
+            content = download_file_fast(file_info["url"], file_info["name"])
+            if content:
+                for line in content.splitlines():
+                    if query in line:
+                        phones = re.findall(r'\d{7,15}', line)
+                        names = re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+', line)
+                        emails = re.findall(r'\S+@\S+', line)
+                        
+                        for phone in phones:
+                            results.append(f"📞 {phone}")
+                        for name in names:
+                            results.append(f"👤 {name}")
+                        for email in emails:
+                            results.append(f"📧 {email}")
+        except Exception as e:
+            logger.error(f"Ошибка в базе {file_info['name']}: {e}")
+            continue
+    
+    return results
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚫 Отменено")
@@ -448,7 +452,7 @@ def main():
     user_data[ADMIN_ID]["unlimited"] = True
     user_data[ADMIN_ID]["searches_left"] = 9999
     
-    logging.info(f"🟢 БОТ ЗАПУЩЕН! Многопользовательский режим активирован!")
+    logging.info(f"🟢 БОТ ЗАПУЩЕН! 15+ пользователей одновременно!")
     app.run_polling()
 
 if __name__ == "__main__":
