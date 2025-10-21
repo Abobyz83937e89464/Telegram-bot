@@ -6,6 +6,7 @@ import threading
 import asyncio
 import time
 import sys
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -27,11 +28,6 @@ ADMIN_ID = 8049083248
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# КЭШ БАЗ ДАННЫХ В ОЗУ
-DATABASE_CACHE = {}
-CACHE_TIMESTAMP = 0
-CACHE_TTL = 3600  # 1 час
-
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -44,12 +40,12 @@ def start_health_server():
     server = HTTPServer(('0.0.0.0', 10000), HealthHandler)
     server.serve_forever()
 
-# ХРАНИЛИЩЕ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ И РАССЫЛКИ
-user_ids = set()
+# ХРАНИЛИЩЕ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ И ЗАПРОСОВ
+user_data = {}  # {user_id: {"searches_left": 3, "last_reset": timestamp, "unlimited": False}}
 active_searches = 0
 max_concurrent_searches = 10
 
-MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL, BROADCAST_MESSAGE = range(5)
+MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL, BROADCAST_MESSAGE, ADD_SEARCHES = range(6)
 
 DRIVE_FILES = [
     {"name": "boo.wf_100mln_0.csv", "url": "https://drive.google.com/uc?export=download&id=1U6C-SqeNWv3ylYujFBTZS0yY1uWk2BQk"},
@@ -73,96 +69,85 @@ DRIVE_FILES = [
 # ПУЛ ДЛЯ ПОИСКА
 search_executor = ThreadPoolExecutor(max_workers=15)
 
+def init_user(user_id):
+    """ИНИЦИАЛИЗАЦИЯ ПОЛЬЗОВАТЕЛЯ"""
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "searches_left": 3,
+            "last_reset": time.time(),
+            "unlimited": False
+        }
+    elif user_id == ADMIN_ID:
+        user_data[user_id]["unlimited"] = True
+    
+    # ПРОВЕРКА СБРОСА ЗАПРОСОВ (КАЖДЫЙ ЧАС)
+    user = user_data[user_id]
+    if time.time() - user["last_reset"] >= 3600:  # 1 час
+        user["searches_left"] = 3
+        user["last_reset"] = time.time()
+    
+    return user_data[user_id]
+
 async def save_user(user_id, username, first_name):
-    user_ids.add(user_id)
+    init_user(user_id)
 
 def download_file_fast(drive_url, file_name):
     try:
-        response = requests.get(drive_url, timeout=30)
+        response = requests.get(drive_url, timeout=60)
         if response.status_code == 200:
             return response.text
         return ""
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка загрузки {file_name}: {e}")
         return ""
-
-def load_databases_to_cache():
-    """ЗАГРУЖАЕМ БАЗЫ В КЭШ 1 РАЗ В ЧАС"""
-    global DATABASE_CACHE, CACHE_TIMESTAMP
-    
-    current_time = time.time()
-    if current_time - CACHE_TIMESTAMP < CACHE_TTL and DATABASE_CACHE:
-        return DATABASE_CACHE
-    
-    logger.info("🔄 Загрузка баз в кэш...")
-    new_cache = {}
-    
-    for file_info in DRIVE_FILES:
-        file_name = file_info["name"]
-        file_url = file_info["url"]
-        
-        content = download_file_fast(file_url, file_name)
-        if content:
-            new_cache[file_name] = content.splitlines()
-    
-    DATABASE_CACHE = new_cache
-    CACHE_TIMESTAMP = current_time
-    logger.info(f"✅ Базы загружены: {len(DATABASE_CACHE)} файлов")
-    return DATABASE_CACHE
-
-def fast_search_in_cache(query, databases):
-    """БЫСТРЫЙ ПОИСК В КЭШИРОВАННЫХ БАЗАХ"""
-    results = []
-    
-    for file_name, lines in databases.items():
-        for line in lines:
-            if query in line:
-                phones = re.findall(r'\d{7,15}', line)
-                names = re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+', line)
-                emails = re.findall(r'\S+@\S+', line)
-                
-                for phone in phones:
-                    results.append(f"📞 {phone}")
-                for name in names:
-                    results.append(f"👤 {name}")
-                for email in emails:
-                    results.append(f"📧 {email}")
-    
-    return results
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     await save_user(user.id, user.username, user.first_name)
+    user_info = init_user(user.id)
     
     if user.id == ADMIN_ID:
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
         await update.message.reply_text(
-            "🤖 **ГЛАВНОЕ МЕНЮ**\nВыберите режим:",
+            f"🤖 **ГЛАВНОЕ МЕНЮ**\n\n💎 Запросов: ∞ (админ)\nВыберите режим:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
         )
         return MAIN_MENU
     else:
         await update.message.reply_text(
-            "🔐 **СИСТЕМА ПОИСКА**\n\n💎 *Если информация существует - я её найду!*\n\nВведите пароль:"
+            f"🔐 **СИСТЕМА ПОИСКА**\n\n"
+            f"💎 *Доступно запросов: {user_info['searches_left']}/3*\n"
+            f"🕐 *Пополнение: каждые 60 минут*\n\n"
+            f"💎 *Если информация существует - я её найду!*\n\n"
+            f"Введите пароль:"
         )
         return PASSWORD_CHECK
 
 async def back_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
+    user_info = init_user(user.id)
     
     if user.id == ADMIN_ID:
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
         await update.message.reply_text(
-            "🤖 **ГЛАВНОЕ МЕНЮ**\nВыберите режим:",
+            f"🤖 **ГЛАВНОЕ МЕНЮ**\n\n💎 Запросов: ∞ (админ)\nВыберите режим:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
         )
         return MAIN_MENU
     else:
         await update.message.reply_text(
-            "🔐 **СИСТЕМА ПОИСКА**\n\n💎 *Если информация существует - я её найду!*\n\nВведите пароль:"
+            f"🔐 **СИСТЕМА ПОИСКА**\n\n"
+            f"💎 *Доступно запросов: {user_info['searches_left']}/3*\n"
+            f"🕐 *Пополнение: каждые 60 минут*\n\n"
+            f"💎 *Если информация существует - я её найду!*\n\n"
+            f"Введите пароль:"
         )
         return PASSWORD_CHECK
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    user_info = init_user(user.id)
+    
     choice = update.message.text
     
     if choice == "🔍 Поиск данных":
@@ -172,7 +157,8 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif choice == "👑 Админ панель":
         keyboard = [
             ["📊 Статистика", "👥 Пользователи"],
-            ["📢 Рассылка", "🔙 В главное меню"]
+            ["🎁 Выдать запросы", "📢 Рассылка"],
+            ["🔙 В главное меню"]
         ]
         await update.message.reply_text(
             "👑 **АДМИН ПАНЕЛЬ**\nВыберите действие:",
@@ -184,12 +170,35 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     choice = update.message.text
     
     if choice == "📊 Статистика":
-        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {len(user_ids)}\n📁 Файлов: {len(DRIVE_FILES)}\n🔍 Активных поисков: {active_searches}")
+        total_users = len(user_data)
+        active_now = sum(1 for user_id in user_data if time.time() - user_data[user_id].get("last_reset", 0) < 86400)
+        await update.message.reply_text(
+            f"📊 **СТАТИСТИКА**\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"🔥 Активных (24ч): {active_now}\n"
+            f"📁 Файлов: {len(DRIVE_FILES)}\n"
+            f"🔍 Активных поисков: {active_searches}"
+        )
         return ADMIN_PANEL
         
     elif choice == "👥 Пользователи":
-        await update.message.reply_text(f"👥 **ПОЛЬЗОВАТЕЛИ**\n\nВсего пользователей: {len(user_ids)}")
+        recent_users = sorted(user_data.items(), key=lambda x: x[1].get("last_reset", 0), reverse=True)[:5]
+        response = "👥 **ПОСЛЕДНИЕ ПОЛЬЗОВАТЕЛИ:**\n\n"
+        for user_id, data in recent_users:
+            searches = data.get("searches_left", 0)
+            response += f"👤 ID: {user_id}\n💎 Запросов: {searches}\n━━━━━━━━━━\n"
+        await update.message.reply_text(response)
         return ADMIN_PANEL
+        
+    elif choice == "🎁 Выдать запросы":
+        await update.message.reply_text(
+            "🎁 **ВЫДАЧА ЗАПРОСОВ**\n\n"
+            "Введите ID пользователя и количество запросов через пробел:\n"
+            "Пример: `123456789 10` - выдать 10 запросов пользователю 123456789\n\n"
+            "Или: `123456789 unlimited` - выдать безлимит",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ADD_SEARCHES
         
     elif choice == "📢 Рассылка":
         await update.message.reply_text("📢 **РАССЫЛКА**\n\nВведите сообщение для рассылки:", reply_markup=ReplyKeyboardRemove())
@@ -200,19 +209,63 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False))
         return MAIN_MENU
 
+async def handle_add_searches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    parts = text.split()
+    
+    if len(parts) != 2:
+        await update.message.reply_text("❌ Неверный формат. Используйте: `ID_пользователя количество`")
+        return ADD_SEARCHES
+    
+    try:
+        user_id = int(parts[0])
+        amount = parts[1]
+        
+        if user_id not in user_data:
+            await update.message.reply_text("❌ Пользователь не найден")
+            return ADD_SEARCHES
+        
+        if amount.lower() == "unlimited":
+            user_data[user_id]["unlimited"] = True
+            user_data[user_id]["searches_left"] = 9999
+            await update.message.reply_text(f"✅ Пользователю {user_id} выдан БЕЗЛИМИТ")
+        else:
+            add_amount = int(amount)
+            user_data[user_id]["searches_left"] += add_amount
+            await update.message.reply_text(f"✅ Пользователю {user_id} добавлено {add_amount} запросов")
+        
+        # ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🎁 **Вам выданы дополнительные запросы!**\n\n"
+                     f"💎 Теперь доступно: {user_data[user_id]['searches_left']} запросов\n\n"
+                     f"Спасибо за использование нашего сервиса! 💫"
+            )
+        except:
+            pass
+            
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Используйте: `ID_пользователя количество`")
+        return ADD_SEARCHES
+    
+    keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
+    await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False))
+    return MAIN_MENU
+
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     success = 0
     failed = 0
     
-    broadcast_msg = await update.message.reply_text(f"📢 **Рассылка начата**\n\nОтправлено: 0/{len(user_ids)}")
+    broadcast_msg = await update.message.reply_text(f"📢 **Рассылка начата**\n\nОтправлено: 0/{len(user_data)}")
     
-    for user_id in list(user_ids):
+    for user_id in list(user_data.keys()):
         try:
             await context.bot.send_message(chat_id=user_id, text=f"📢 **РАССЫЛКА:**\n\n{message}")
             success += 1
             if success % 10 == 0:
-                await broadcast_msg.edit_text(f"📢 **Рассылка...**\n\nОтправлено: {success}/{len(user_ids)}")
+                await broadcast_msg.edit_text(f"📢 **Рассылка...**\n\nОтправлено: {success}/{len(user_data)}")
         except:
             failed += 1
     
@@ -223,17 +276,38 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    user_info = init_user(user.id)
+    
     if update.message.text.strip() != USER_PASSWORD:
         await update.message.reply_text("❌ НЕВЕРНЫЙ ПАРОЛЬ!")
         return ConversationHandler.END
     
-    await update.message.reply_text("✅ ДОСТУП РАЗРЕШЕН!\n\nВведите данные для поиска:")
+    await update.message.reply_text(
+        f"✅ ДОСТУП РАЗРЕШЕН!\n\n"
+        f"💎 *Доступно запросов: {user_info['searches_left']}/3*\n\n"
+        f"Введите данные для поиска:"
+    )
     return SEARCH_QUERY
 
 async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active_searches
     
-    # ПРОВЕРКА ЛИМИТА ПОИСКОВ
+    user = update.message.from_user
+    user_info = init_user(user.id)
+    
+    # ПРОВЕРКА ЗАПРОСОВ
+    if not user_info["unlimited"] and user_info["searches_left"] <= 0:
+        await update.message.reply_text(
+            "❌ **ЗАПРОСЫ ЗАКОНЧИЛИСЬ!**\n\n"
+            "💎 Все 3 поиска израсходованы\n"
+            "🕐 Новые запросы будут через 60 минут\n\n"
+            "🚀 **ХОТИТЕ БОЛЬШЕ ЗАПРОСОВ?**\n"
+            "Обратитесь к создателю: @the_observer_os\n\n"
+            "💫 *Мы ценим каждого пользователя!*"
+        )
+        return ConversationHandler.END
+    
     if active_searches >= max_concurrent_searches:
         await update.message.reply_text("⏳ Сервер перегружен. Попробуйте через 10 секунд.")
         return SEARCH_QUERY
@@ -247,41 +321,83 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Минимум 2 символа")
         return SEARCH_QUERY
     
+    # СПИСЫВАЕМ ЗАПРОС
+    if not user_info["unlimited"]:
+        user_info["searches_left"] -= 1
+    
     active_searches += 1
-    search_message = await update.message.reply_text(f"🔍 **Поиск:** `{query}`\n\n*Сканирую 16 баз...*")
+    searches_left = user_info["searches_left"] if not user_info["unlimited"] else "∞"
+    
+    search_message = await update.message.reply_text(
+        f"🔍 **Поиск:** `{query}`\n\n"
+        f"💎 *Осталось запросов: {searches_left}*\n"
+        f"*Сканирую 16 баз... (2-3 минуты)*"
+    )
     
     try:
-        # ЗАГРУЖАЕМ БАЗЫ В КЭШ
-        databases = load_databases_to_cache()
+        results = []
         
-        # БЫСТРЫЙ ПОИСК В КЭШЕ С ТАЙМАУТОМ
-        loop = asyncio.get_event_loop()
-        results = await asyncio.wait_for(
-            loop.run_in_executor(search_executor, fast_search_in_cache, query, databases),
-            timeout=15.0
-        )
+        # ПОТОКОВЫЙ ПОИСК ПО 1 БАЗЕ ЗА РАЗ
+        for i, file_info in enumerate(DRIVE_FILES):
+            try:
+                await search_message.edit_text(
+                    f"🔍 **Поиск:** `{query}`\n\n"
+                    f"💎 *Осталось запросов: {searches_left}*\n"
+                    f"*База {i+1}/16: {file_info['name']}*"
+                )
+                
+                # СКАЧИВАЕМ И ИЩЕМ В 1 БАЗЕ
+                content = download_file_fast(file_info["url"], file_info["name"])
+                if content:
+                    for line in content.splitlines():
+                        if query in line:
+                            phones = re.findall(r'\d{7,15}', line)
+                            names = re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+', line)
+                            emails = re.findall(r'\S+@\S+', line)
+                            
+                            for phone in phones:
+                                results.append(f"📞 {phone}")
+                            for name in names:
+                                results.append(f"👤 {name}")
+                            for email in emails:
+                                results.append(f"📧 {email}")
+            except Exception as e:
+                logger.error(f"Ошибка в базе {file_info['name']}: {e}")
+                continue
         
         await search_message.delete()
         
         if results:
-            unique_results = list(set(results))[:50]
-            response = f"✅ **НАЙДЕНО:** `{query}`\n\n📊 Найдено: {len(unique_results)}\n\n"
+            unique_results = list(set(results))
+            response = (
+                f"✅ **НАЙДЕНО:** `{query}`\n\n"
+                f"📊 Найдено: {len(unique_results)}\n"
+                f"💎 Осталось запросов: {searches_left}\n\n"
+            )
             
-            for result in unique_results[:20]:
+            for result in unique_results[:30]:
                 response += f"• {result}\n"
                 
-            if len(unique_results) > 20:
-                response += f"\n... и еще {len(unique_results) - 20} результатов"
+            if len(unique_results) > 30:
+                response += f"\n... и еще {len(unique_results) - 30} результатов"
                 
             await update.message.reply_text(response)
         else:
-            await update.message.reply_text(f"❌ **НЕ НАЙДЕНО:** `{query}`")
+            await update.message.reply_text(
+                f"❌ **НЕ НАЙДЕНО:** `{query}`\n\n"
+                f"💎 Осталось запросов: {searches_left}"
+            )
         
-        await update.message.reply_text("**Введите данные для поиска или /back:**")
+        if not user_info["unlimited"] and user_info["searches_left"] == 0:
+            await update.message.reply_text(
+                "⚠️ **ПОСЛЕДНИЙ ЗАПРОС ИСПОЛЬЗОВАН!**\n\n"
+                "🚀 **ХОТИТЕ БОЛЬШЕ ЗАПРОСОВ?**\n"
+                "Обратитесь к создателю: @the_observer_os\n\n"
+                "💫 *Мы ценим каждого пользователя!*"
+            )
+        else:
+            await update.message.reply_text("**Введите данные для поиска или /back:**")
         
-    except asyncio.TimeoutError:
-        await search_message.edit_text("⏰ Поиск прерван (таймаут 15с)")
-        await update.message.reply_text("**Введите данные для поиска или /back:**")
     except Exception as e:
         logger.error(f"Ошибка поиска: {e}")
         await search_message.edit_text("❌ Ошибка поиска")
@@ -306,6 +422,7 @@ def main():
             SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_data)],
             ADMIN_PANEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_panel)],
             BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast)],
+            ADD_SEARCHES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_searches)],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("back", back_command)]
     )
@@ -313,11 +430,12 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("back", back_command))
     
-    # ПРЕДЗАГРУЗКА БАЗ
-    logger.info("🔄 Предзагрузка баз в кэш...")
-    load_databases_to_cache()
+    # АДМИНУ БЕЗЛИМИТ
+    init_user(ADMIN_ID)
+    user_data[ADMIN_ID]["unlimited"] = True
+    user_data[ADMIN_ID]["searches_left"] = 9999
     
-    logging.info(f"🟢 БОТ ЗАПУЩЕН! {max_concurrent_searches} одновременных поисков!")
+    logging.info(f"🟢 БОТ ЗАПУЩЕН! Система платных запросов активирована!")
     app.run_polling()
 
 if __name__ == "__main__":
