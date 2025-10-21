@@ -44,9 +44,10 @@ def start_health_server():
     server = HTTPServer(('0.0.0.0', 10000), HealthHandler)
     server.serve_forever()
 
-# УБРАЛИ SQLITE
-async def save_user(user_id, username, first_name):
-    pass
+# ХРАНИЛИЩЕ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ И РАССЫЛКИ
+user_ids = set()
+active_searches = 0
+max_concurrent_searches = 10
 
 MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL, BROADCAST_MESSAGE = range(5)
 
@@ -69,8 +70,11 @@ DRIVE_FILES = [
     {"name": "Адрес клиентов_9.3k.csv", "url": "https://drive.google.com/uc?export=download&id=1nZIuSMThLynwXkrJj6jWgos-NwvsSrps"}
 ]
 
-# ПУЛ ПОТОКОВ ДЛЯ МНОГОПОЛЬЗОВАТЕЛЬСКОСТИ
-search_executor = ThreadPoolExecutor(max_workers=20)
+# ПУЛ ДЛЯ ПОИСКА
+search_executor = ThreadPoolExecutor(max_workers=15)
+
+async def save_user(user_id, username, first_name):
+    user_ids.add(user_id)
 
 def download_file_fast(drive_url, file_name):
     try:
@@ -99,11 +103,10 @@ def load_databases_to_cache():
         content = download_file_fast(file_url, file_name)
         if content:
             new_cache[file_name] = content.splitlines()
-            logger.info(f"✅ {file_name} загружен")
     
     DATABASE_CACHE = new_cache
     CACHE_TIMESTAMP = current_time
-    logger.info("✅ Все базы загружены в кэш")
+    logger.info(f"✅ Базы загружены: {len(DATABASE_CACHE)} файлов")
     return DATABASE_CACHE
 
 def fast_search_in_cache(query, databases):
@@ -126,15 +129,9 @@ def fast_search_in_cache(query, databases):
     
     return results
 
-# ХРАНИЛИЩЕ ДЛЯ РАССЫЛКИ
-user_ids = set()
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     await save_user(user.id, user.username, user.first_name)
-    
-    # СОХРАНЯЕМ ЮЗЕРА ДЛЯ РАССЫЛКИ
-    user_ids.add(user.id)
     
     if user.id == ADMIN_ID:
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
@@ -187,7 +184,7 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     choice = update.message.text
     
     if choice == "📊 Статистика":
-        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {len(user_ids)}\n📁 Файлов: {len(DRIVE_FILES)}")
+        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {len(user_ids)}\n📁 Файлов: {len(DRIVE_FILES)}\n🔍 Активных поисков: {active_searches}")
         return ADMIN_PANEL
         
     elif choice == "👥 Пользователи":
@@ -234,6 +231,13 @@ async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SEARCH_QUERY
 
 async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global active_searches
+    
+    # ПРОВЕРКА ЛИМИТА ПОИСКОВ
+    if active_searches >= max_concurrent_searches:
+        await update.message.reply_text("⏳ Сервер перегружен. Попробуйте через 10 секунд.")
+        return SEARCH_QUERY
+    
     query = update.message.text.strip()
     
     if query == "/back":
@@ -243,32 +247,48 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Минимум 2 символа")
         return SEARCH_QUERY
     
+    active_searches += 1
     search_message = await update.message.reply_text(f"🔍 **Поиск:** `{query}`\n\n*Сканирую 16 баз...*")
     
-    # ЗАГРУЖАЕМ БАЗЫ В КЭШ
-    databases = load_databases_to_cache()
-    
-    # БЫСТРЫЙ ПОИСК В КЭШЕ
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(search_executor, fast_search_in_cache, query, databases)
-    
-    await search_message.delete()
-    
-    if results:
-        unique_results = list(set(results))[:100]
-        response = f"✅ **НАЙДЕНО:** `{query}`\n\n📊 Найдено: {len(unique_results)}\n\n"
+    try:
+        # ЗАГРУЖАЕМ БАЗЫ В КЭШ
+        databases = load_databases_to_cache()
         
-        for result in unique_results[:30]:
-            response += f"• {result}\n"
+        # БЫСТРЫЙ ПОИСК В КЭШЕ С ТАЙМАУТОМ
+        loop = asyncio.get_event_loop()
+        results = await asyncio.wait_for(
+            loop.run_in_executor(search_executor, fast_search_in_cache, query, databases),
+            timeout=15.0
+        )
+        
+        await search_message.delete()
+        
+        if results:
+            unique_results = list(set(results))[:50]
+            response = f"✅ **НАЙДЕНО:** `{query}`\n\n📊 Найдено: {len(unique_results)}\n\n"
             
-        if len(unique_results) > 30:
-            response += f"\n... и еще {len(unique_results) - 30} результатов"
-            
-        await update.message.reply_text(response)
-    else:
-        await update.message.reply_text(f"❌ **НЕ НАЙДЕНО:** `{query}`")
+            for result in unique_results[:20]:
+                response += f"• {result}\n"
+                
+            if len(unique_results) > 20:
+                response += f"\n... и еще {len(unique_results) - 20} результатов"
+                
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text(f"❌ **НЕ НАЙДЕНО:** `{query}`")
+        
+        await update.message.reply_text("**Введите данные для поиска или /back:**")
+        
+    except asyncio.TimeoutError:
+        await search_message.edit_text("⏰ Поиск прерван (таймаут 15с)")
+        await update.message.reply_text("**Введите данные для поиска или /back:**")
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+        await search_message.edit_text("❌ Ошибка поиска")
+        await update.message.reply_text("**Введите данные для поиска или /back:**")
+    finally:
+        active_searches -= 1
     
-    await update.message.reply_text("**Введите данные для поиска или /back:**")
     return SEARCH_QUERY
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -293,12 +313,11 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("back", back_command))
     
-    # ПРЕДЗАГРУЗКА БАЗ ПРИ СТАРТЕ
-    if os.getenv('RAILWAY'):
-        logger.info("🔄 Предзагрузка баз в кэш...")
-        load_databases_to_cache()
+    # ПРЕДЗАГРУЗКА БАЗ
+    logger.info("🔄 Предзагрузка баз в кэш...")
+    load_databases_to_cache()
     
-    logging.info("🟢 БОТ ЗАПУЩЕН! 50+ ПОЛЬЗОВАТЕЛЕЙ + РАССЫЛКА!")
+    logging.info(f"🟢 БОТ ЗАПУЩЕН! {max_concurrent_searches} одновременных поисков!")
     app.run_polling()
 
 if __name__ == "__main__":
