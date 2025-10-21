@@ -46,11 +46,24 @@ MAIN_MENU, PASSWORD_CHECK, SEARCH_QUERY, ADMIN_PANEL = range(4)
 DRIVE_FILES = [
     {"name": "boo.wf_100mln_0.csv", "url": "https://drive.google.com/uc?export=download&id=1U6C-SqeNWv3ylYujFBTZS0yY1uWk2BQk"},
     {"name": "Clients.csv", "url": "https://drive.google.com/uc?export=download&id=1EicBhkkAOk_s27-_tHZnbAv8Ik_56TR3"},
-    # ... остальные файлы
+    {"name": "emails1.csv", "url": "https://drive.google.com/uc?export=download&id=1LH8xf06jH7GnOGCC92Ld7e5hJpN4ZxAV"},
+    {"name": "enter_data_copy.sql", "url": "https://drive.google.com/uc?export=download&id=1IDEEjS3gE4TsqJ-_bdYPAfttS7Slbyq2"},
+    {"name": "Fbi.gov.csv", "url": "https://drive.google.com/uc?export=download&id=1leVbmb7ZHOw5f9NBLEImu2Ob2UPLiKlk"},
+    {"name": "GetContact_2020_19kk.csv", "url": "https://drive.google.com/uc?export=download&id=1f0Ns-HJfZQyn-5SBj74QTUwBvHW9n6yh"},
+    {"name": "getcontact.com numbuster.com.csv", "url": "https://drive.google.com/uc?export=download&id=1czMpRLgFXQo8xTs6FDZVL7_jFF99Xpar"},
+    {"name": "getcontact.csv", "url": "https://drive.google.com/uc?export=download&id=1gSCz1BnD1M19hZpQow_-3s8CnVhm8RxQ"},
+    {"name": "hlbd_form_results.sql", "url": "https://drive.google.com/uc?export=download&id=1hCEPyENccz0m4qKlvrMJVCj_Y0IcH9j_"},
+    {"name": "itlyceum_felix.csv", "url": "https://drive.google.com/uc?export=download&id=1oBzfT6JOxJkYajCBA9iXvg6Jc_KSZwfK"},
+    {"name": "kztg.csv", "url": "https://drive.google.com/uc?export=download&id=1SlTbBKJ-BDoEpyyL0L46c45Bu142H4pM"},
+    {"name": "Phone Pay -1.xlsx", "url": "https://drive.google.com/uc?export=download&id=1k3R1TxqoeTMvguYn8pjCICNFcU7mup2l"},
+    {"name": "Phone Pay -2.xlsx", "url": "https://drive.google.com/uc?export=download&id=1k3R1TxqoeTMvguYn8pjCICNFcU7mup2l"},
+    {"name": "Phone Pay.xlsx", "url": "https://drive.google.com/uc?export=download&id=1vMylLEXUECkL5rvXVgeKejDA_RiFyfOt"},
+    {"name": "phone.csv", "url": "https://drive.google.com/uc?export=download&id=1_4fy0XswInx6Ke8JzI0gKuo5jzcG4LYm"},
+    {"name": "Адрес клиентов_9.3k.csv", "url": "https://drive.google.com/uc?export=download&id=1nZIuSMThLynwXkrJj6jWgos-NwvsSrps"}
 ]
 
 # ПУЛ ПОТОКОВ ДЛЯ МНОГОПОЛЬЗОВАТЕЛЬСКОСТИ
-search_executor = ThreadPoolExecutor(max_workers=20)  # 20 одновременных поисков
+search_executor = ThreadPoolExecutor(max_workers=20)
 
 async def save_user(user_id, username, first_name):
     try:
@@ -120,13 +133,82 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user.id == ADMIN_ID:
         keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
-        await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        await update.message.reply_text(
+            "🤖 **ГЛАВНОЕ МЕНЮ**\nВыберите режим:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+        )
         return MAIN_MENU
     else:
-        await update.message.reply_text("🔐 **СИСТЕМА ПОИСКА**\n\nВведите пароль:")
+        await update.message.reply_text(
+            "🔐 **СИСТЕМА ПОИСКА**\n\n💎 *Если информация существует - я её найду!*\n\nВведите пароль:"
+        )
         return PASSWORD_CHECK
 
-# ... остальные функции (back_command, handle_main_menu, handle_admin_panel, check_password) остаются без изменений ...
+async def back_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    
+    if user.id == ADMIN_ID:
+        keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
+        await update.message.reply_text(
+            "🤖 **ГЛАВНОЕ МЕНЮ**\nВыберите режим:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+        )
+        return MAIN_MENU
+    else:
+        await update.message.reply_text(
+            "🔐 **СИСТЕМА ПОИСКА**\n\n💎 *Если информация существует - я её найду!*\n\nВведите пароль:"
+        )
+        return PASSWORD_CHECK
+
+async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text
+    
+    if choice == "🔍 Поиск данных":
+        await update.message.reply_text("Введите пароль:", reply_markup=ReplyKeyboardRemove())
+        return PASSWORD_CHECK
+        
+    elif choice == "👑 Админ панель":
+        keyboard = [
+            ["📊 Статистика", "👥 Пользователи"],
+            ["🔙 В главное меню"]
+        ]
+        await update.message.reply_text(
+            "👑 **АДМИН ПАНЕЛЬ**\nВыберите действие:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+        )
+        return ADMIN_PANEL
+
+async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text
+    
+    if choice == "📊 Статистика":
+        c.execute("SELECT COUNT(*) FROM users")
+        user_count = c.fetchone()[0]
+        files_count = len(DRIVE_FILES)
+        await update.message.reply_text(f"📊 **СТАТИСТИКА**\n\n👥 Пользователей: {user_count}\n📁 Файлов: {files_count}")
+        return ADMIN_PANEL
+        
+    elif choice == "👥 Пользователи":
+        c.execute("SELECT user_id, first_name, joined_date FROM users ORDER BY joined_date DESC LIMIT 5")
+        users = c.fetchall()
+        response = "👥 **ПОЛЬЗОВАТЕЛИ:**\n\n"
+        for user in users:
+            response += f"👤 {user[1] or 'No name'}\n🆔 {user[0]}\n📅 {user[2]}\n━━━━━━━━━━\n"
+        await update.message.reply_text(response)
+        return ADMIN_PANEL
+        
+    elif choice == "🔙 В главное меню":
+        keyboard = [["🔍 Поиск данных", "👑 Админ панель"]]
+        await update.message.reply_text("🤖 **ГЛАВНОЕ МЕНЮ**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False))
+        return MAIN_MENU
+
+async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text.strip() != USER_PASSWORD:
+        await update.message.reply_text("❌ НЕВЕРНЫЙ ПАРОЛЬ!")
+        return ConversationHandler.END
+    
+    await update.message.reply_text("✅ ДОСТУП РАЗРЕШЕН!\n\nВведите данные для поиска:")
+    return SEARCH_QUERY
 
 async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
@@ -150,12 +232,12 @@ async def search_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await search_message.delete()
     
     if results:
-        unique_results = list(set(results))[:100]  # Лимит 100 результатов
-        response = f"✅ **НАЙДЕНО:** `{query}`\n\n📊 Результатов: {len(unique_results)}\n\n"
+        unique_results = list(set(results))[:100]
+        response = f"✅ **НАЙДЕНО:** `{query}`\n\n📊 Найдено: {len(unique_results)}\n\n"
         
-        for result in unique_results[:30]:  # Показываем первые 30
+        for result in unique_results[:30]:
             response += f"• {result}\n"
-        
+            
         if len(unique_results) > 30:
             response += f"\n... и еще {len(unique_results) - 30} результатов"
             
@@ -194,7 +276,7 @@ def main():
         logger.info("🔄 Предзагрузка баз в кэш...")
         load_databases_to_cache()
     
-    logger.info("🟢 БОТ ЗАПУЩЕН! 50+ ПОЛЬЗОВАТЕЛЕЙ ГОТОВО!")
+    logging.info("🟢 БОТ ЗАПУЩЕН! 50+ ПОЛЬЗОВАТЕЛЕЙ ГОТОВО!")
     app.run_polling()
 
 if __name__ == "__main__":
